@@ -5,6 +5,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import base64
 from colorama import Fore, Style
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 max_data_size = 500 * 1024 * 1024
 max_size = 90000
@@ -48,23 +49,41 @@ def encode_folder_to_png(folder_path, output_png, compression_method='lzma', pro
             compression_type = zipfile.ZIP_LZMA
             compresslevel = 1
 
-        with zipfile.ZipFile(zip_bytes, 'w', compression_type, compresslevel=compresslevel) as zipf:
-            total_files = sum(len(files) for _, _, files in os.walk(folder_path))
-            processed = 0
+        # Collect all files
+        file_list = []
+        for root, _, files in os.walk(folder_path):
+            for f in files:
+                file_path = os.path.join(root, f)
+                arcname = os.path.relpath(file_path, folder_path)
+                file_list.append((arcname, file_path))
 
-            for root, _, files in os.walk(folder_path):
-                for f in files:
-                    file_path = os.path.join(root, f)
-                    arcname = os.path.relpath(file_path, folder_path)
-                    zipf.write(file_path, arcname)
-                    msg = f"Added: {arcname}"
-                    if log_callback:
-                        log_callback(msg)
-                    else:
-                        print(Fore.CYAN + msg + Style.RESET_ALL)
-                    processed += 1
-                    if progress_callback and processed % max(1, total_files // 100) == 0:
-                        progress_callback((processed / total_files) * 100, f'Adding files: {processed}/{total_files}')
+        total_files = len(file_list)
+
+        def read_file_data(arcname, file_path):
+            try:
+                with open(file_path, 'rb') as file:
+                    return arcname, file.read()
+            except Exception as e:
+                raise Exception(f"Error reading {file_path}: {e}")
+
+        with zipfile.ZipFile(zip_bytes, 'w', compression_type, compresslevel=compresslevel) as zipf:
+            processed = 0
+            batch_size = 8
+            for i in range(0, total_files, batch_size):
+                batch = file_list[i:i + batch_size]
+                with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                    futures = [executor.submit(read_file_data, arcname, file_path) for arcname, file_path in batch]
+                    for future in as_completed(futures):
+                        arcname, data = future.result()
+                        zipf.writestr(arcname, data)
+                        msg = f"Added: {arcname}"
+                        if log_callback:
+                            log_callback(msg)
+                        else:
+                            print(Fore.CYAN + msg + Style.RESET_ALL)
+                        processed += 1
+                        if progress_callback and processed % max(1, total_files // 100) == 0:
+                            progress_callback((processed / total_files) * 100, f'Adding files: {processed}/{total_files}')
 
         msg = "ZIP file created successfully."
         if log_callback:
